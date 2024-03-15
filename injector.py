@@ -552,12 +552,12 @@ class IPatternScanner:
         try:
             res = next(s)
         except StopIteration:
-            raise KeyError('pattern not found')
+            raise KeyError(f'pattern {pattern} not found')
         try:
             next(s)
         except StopIteration:
             return res
-        raise KeyError('pattern is not unique, at least 2 is found')
+        raise KeyError(f'pattern {pattern} is not unique, at least 2 is found')
 
     def find_addresses(self, pattern: str | Pattern):
         for address, _ in self.search(pattern):
@@ -1742,30 +1742,166 @@ i8_from = Process.current.read_i8  # lambda a: ctypes.c_int8.from_address(a).val
 i32_from = Process.current.read_i32  # lambda a: ctypes.c_int32.from_address(a).value
 u32_from = Process.current.read_u32  # lambda a: ctypes.c_uint32.from_address(a).value
 u64_from = Process.current.read_u64  # lambda a: ctypes.c_uint64.from_address(a).value
+float_from = Process.current.read_float
+string_from = Process.current.read_bytes_zero_trim
 v_func = lambda a, off: size_t_from(size_t_from(a) + off)
 
-i_actor_0x48 = ctypes.CFUNCTYPE(ctypes.c_size_t, ctypes.c_size_t, ctypes.c_size_t)
-# i_actor_0x50 = ctypes.CFUNCTYPE(ctypes.c_size_t, ctypes.c_size_t, ctypes.c_size_t)
-i_actor_0x58 = ctypes.CFUNCTYPE(ctypes.c_size_t, ctypes.c_size_t, ctypes.c_size_t)
-actor_data_with_cache = False
-actor_data_dec = functools.cache if actor_data_with_cache else lambda f: f
 
-@actor_data_dec
-def actor_base_name(a1):
-    i_actor_0x48(v_func(a1, 0x48))(a1, ctypes.addressof(type_name := ctypes.c_char_p()))
-    # i_actor_0x50(v_func(a1, 0x50))(a1, ctypes.addressof(type_name := ctypes.c_char_p()))
-    return type_name.value.decode()
+class VFunc:
+    def __init__(self, i, off, vt_off=0):
+        self.i = i
+        self.off = off
+        self.vt_off = vt_off
 
-
-@actor_data_dec
-def actor_type_id(a1):
-    i_actor_0x58(v_func(a1, 0x58))(a1, ctypes.addressof(val := ctypes.c_uint32()))
-    return val.value
+    def __get__(self, instance, owner):
+        if instance is None: return self
+        this = instance.address
+        return lambda *a: self.i(v_func(this + self.vt_off, self.off))(this, *a)
 
 
-@actor_data_dec
-def actor_idx(a1):
-    return u32_from(a1 + 0x170)
+# TODO: use aob to find the offset...
+
+class Actor:
+    _get_base_name = VFunc(ctypes.CFUNCTYPE(ctypes.c_size_t, ctypes.c_size_t, ctypes.c_size_t), 0x48)
+    _get_type_name = VFunc(ctypes.CFUNCTYPE(ctypes.c_size_t, ctypes.c_size_t, ctypes.c_size_t), 0x50)
+    _get_type_id = VFunc(ctypes.CFUNCTYPE(ctypes.c_size_t, ctypes.c_size_t, ctypes.c_size_t), 0x58)
+
+    class Sigil(ctypes.Structure):
+        _fields_ = [
+            ('first_trait_id', ctypes.c_uint32),
+            ('first_trait_level', ctypes.c_uint32),
+            ('second_trait_id', ctypes.c_uint32),
+            ('second_trait_level', ctypes.c_uint32),
+            ('sigil_id', ctypes.c_uint32),
+            ('equipped_character', ctypes.c_uint32),
+            ('sigil_level', ctypes.c_uint32),
+            ('acquisition_count', ctypes.c_uint32),
+            ('notification_enum', ctypes.c_uint32),
+        ]
+
+    class Offsets:
+        p_data_off = 0
+
+    def __str__(self):
+        return f"{self.type_name}#{self.address:x}"
+
+    def __init__(self, address):
+        self.address = address
+
+    @property
+    def type_name(self):
+        self._get_base_name(ctypes.addressof(type_name := ctypes.c_char_p()))
+        return type_name.value.decode()
+
+    @property
+    def base_name(self):
+        self._get_type_name(ctypes.addressof(type_name := ctypes.c_char_p()))
+        return type_name.value.decode()
+
+    @property
+    def type_id(self):
+        self._get_type_id(ctypes.addressof(val := ctypes.c_uint32()))
+        return val.value
+
+    @property
+    def idx(self):
+        return u32_from(self.address + 0x170)
+
+    @property
+    def parent(self):
+        # TODO: 找个通用方法溯源
+        match self.type_id:
+            case 0x2af678e8:  # 菲莉宝宝 # Pl0700Ghost
+                return Actor(size_t_from(size_t_from(self.address + 0xE48) + 0x70))
+            case 0x8364c8bc:  # 菲莉 绕身球  # Pl0700GhostSatellite
+                return Actor(size_t_from(size_t_from(self.address + 0x508) + 0x70))
+            case 0xc9f45042:  # 老男人武器 # Wp1890
+                return Actor(size_t_from(size_t_from(self.address + 0x578) + 0x70))
+            case 0xf5755c0e:  # 龙人化 # Pl2000
+                return Actor(size_t_from(size_t_from(self.address + 0xD138) + 0x70))
+
+    @property
+    def canceled_action(self):
+        return u32_from(self.address + 0xbff8)
+
+    # only for player?
+    @property
+    def p_data(self):
+        assert self.Offsets.p_data_off
+        return size_t_from(self.address + self.Offsets.p_data_off)
+
+    @property
+    def sigils(self):
+        p_data = self.p_data
+        size_t_from(p_data)  # test address
+        return (self.Sigil * 12).from_address(p_data)
+
+    @property
+    def is_online(self):
+        return u32_from(self.p_data + 0x1c8)
+
+    @property
+    def c_name(self):
+        return string_from(self.p_data + 0x1e8, 0x10).decode('utf-8', 'ignore')
+
+    @property
+    def d_name(self):
+        return string_from(self.p_data + 0x208, 0x10).decode('utf-8', 'ignore')
+
+    @property
+    def party_index(self):
+        return u32_from(self.p_data + 0x230)
+
+    def member_info(self):
+        return {
+            'sigils': [
+                {
+                    'first_trait_id': s.first_trait_id,
+                    'first_trait_level': s.first_trait_level,
+                    'second_trait_id': s.second_trait_id,
+                    'second_trait_level': s.second_trait_level,
+                    'sigil_id': s.sigil_id,
+                    'sigil_level': s.sigil_level,
+                } for s in self.sigils
+            ],
+            'is_online': self.is_online,
+            'c_name': self.c_name,
+            'd_name': self.d_name,
+        }
+
+
+class ProcessDamageSource:
+    # note: use v_func(address,0x2d8) to analyze the source parent...
+    def __init__(self, address):
+        self.address = address
+
+    @property
+    def actor(self):
+        return Actor(size_t_from(size_t_from(self.address + 0x18) + 0x70))
+
+    @property
+    def damage(self):
+        return i32_from(self.address + 0xd0)
+
+    @property
+    def flags(self):
+        return u64_from(self.address + 0xd8)
+
+    @property
+    def critical(self):
+        return i8_from(self.address + 0x149)
+
+    @property
+    def dmg_cap(self):
+        return i32_from(self.address + 0x264)
+
+    @property
+    def attack_rate(self):
+        return float_from(self.address + 0xd4)
+
+    @property
+    def action_id(self):
+        return u32_from(self.address + 0x154)
 
 
 def ensure_same(args):
@@ -1795,28 +1931,29 @@ class Act:
         ])
 
         p_on_enter_area, = scanner.find_val('e8 * * * * c5 ? ? ? c5 f8 29 45 ? c7 45 ? ? ? ? ?')
-        self.on_enter_area_hook = Hook(p_on_enter_area, self._on_enter_area, ctypes.c_size_t, [
+        self.on_enter_area_hook = Hook(p_on_enter_area, self._on_enter_area, ctypes.c_uint64, [
             ctypes.c_uint,
-            ctypes.c_size_t,
-            ctypes.c_uint8
+            ctypes.c_uint64,
+            ctypes.c_uint64,
+            ctypes.c_uint64,
         ])
 
-        self.i_a1_0x40 = ctypes.CFUNCTYPE(
-            ctypes.c_uint32,
-            ctypes.c_size_t, ctypes.c_size_t, ctypes.c_size_t, ctypes.c_size_t, ctypes.c_size_t
-        )
+        self.p_qword_1467572B0, = scanner.find_val("48 ? ? * * * * 44 89 48")
 
-        self.p_qword_1467572B0, = scanner.find_val("48 ? ? * * * * 83 66 ? ? 48 ? ?")
+        p_data_off1, = scanner.find_val("48 ? ? <? ? ? ?> 89 86 ? ? ? ? 44 89 96")
+        p_data_off2, = scanner.find_val("49 89 84 24 <? ? ? ?> 48 ? ? 74 ? 49 ? ? ? ? ? ? ? 48 89 43 ? ")
+        Actor.Offsets.p_data_off = p_data_off1 + p_data_off2
 
         self.i_ui_comp_name = ctypes.CFUNCTYPE(ctypes.c_char_p, ctypes.c_size_t)
         self.team_map = None
+        self.member_info = None
 
-    def actor_data(self, a1):
-        return actor_base_name(a1), actor_idx(a1), actor_type_id(a1), self.team_map.get(a1, -1) if self.team_map else -1
+    def actor_data(self, actor: Actor):
+        return actor.type_name, actor.idx, actor.type_id, self.team_map.get(actor.address, -1) if self.team_map else -1
 
     def build_team_map(self):
         if self.team_map is not None: return
-        res = {}
+        self.team_map = {}
         qword_1467572B0 = size_t_from(self.p_qword_1467572B0)
         p_party_base = size_t_from(qword_1467572B0 + 0x20)
         p_party_tbl = size_t_from(p_party_base + 0x10 * (size_t_from(qword_1467572B0 + 0x38) & 0x6C4F1B4D) + 8)
@@ -1826,34 +1963,49 @@ class Act:
             for i, p_data in enumerate(range(party_start, party_end, 0x10)):
                 a1 = size_t_from(p_data + 8)
                 if (self.i_ui_comp_name(v_func(a1, 0x8))(a1) == b'ui::component::ControllerPlParameter01' and
-                        (p_actor := size_t_from(a1 + 0x5D0))):
+                        (p_actor := size_t_from(a1 + 0x5f8))):
                     p_actor_data = size_t_from(p_actor + 0x70)
-                    res[p_actor_data] = i
-                    print(f'[{i}] {p_actor=:#x}')
-        self.team_map = res
+                    self.team_map[p_actor_data] = i
+                    print(f'[{i}] {p_actor_data=:#x}')
 
-    def _on_process_damage_evt(self, hook, a1, a2, a3, a4):
-        source = target = 0
+        self.member_info = [None, None, None, None, None, ]
+        for p_member, i in self.team_map.items():
+            try:
+                actor = Actor(p_member)
+                self.member_info[i] = actor.member_info() | {
+                    'common_info': self.actor_data(actor)
+                }
+            except:
+                logging.error(f'build_team_map {i}', exc_info=True)
+        self.on_load_party(self.member_info)
+
+    def _on_process_damage_evt(self, hook, p_target_evt, p_source_evt, a3, a4):
+        source_evt = ProcessDamageSource(p_source_evt)
+        target = source = None
         try:
             self.build_team_map()
-            target = size_t_from(size_t_from(a1 + 8))
-            source = size_t_from(size_t_from(a2 + 0x18) + 0x70)
-            flag = not (a4 or self.i_a1_0x40(v_func(a1, 0x40))(a1, a2, 0, target, source))
+            target = Actor(size_t_from(size_t_from(p_target_evt + 8)))
+            source = source_evt.actor
         except:
             logging.error('on_process_damage_evt', exc_info=True)
-            flag = True
-        res = hook.original(a1, a2, a3, a4)
-        if flag: return res
+        res = hook.original(p_target_evt, p_source_evt, a3, a4)  # return 0 if it is non processed damage event
+        if not (res and target and source): return res  # or if get target or source failed
         try:
-            dmg = i32_from(a2 + 0xd0)
-            flags_ = u64_from(a2 + 0xd8)
-            if (1 << 7 | 1 << 50) & flags_:
-                action_id = -1  # link attack
-            elif (1 << 13 | 1 << 14) & flags_:
-                action_id = -2  # limit break
+            flags_ = source_evt.flags
+            if source.type_id == 0x2af678e8:  # 菲莉宝宝 # Pl0700Ghost
+                source = source.parent
+                action_id = -0x10  # summon attack
             else:
-                action_id = u32_from(a2 + 0x154)
-            self._on_damage(source, target, dmg, flags_, action_id)
+                source = source.parent or source
+                if (1 << 7 | 1 << 50) & flags_:
+                    action_id = -1  # link attack
+                elif (1 << 13 | 1 << 14) & flags_:
+                    action_id = -2  # limit break
+                else:
+                    action_id = source_evt.action_id
+                    if action_id == 0xFFFFFFFF:
+                        action_id = source.canceled_action
+            self._on_damage(source, target, source_evt.damage, flags_, action_id)
         except:
             logging.error('on_process_damage_evt', exc_info=True)
         return res
@@ -1862,54 +2014,31 @@ class Act:
         res = hook.original(a1, a2)
         try:
             dmg = i32_from(a2)
-            target = size_t_from(size_t_from(a1 + 0x18) + 0x70)
-            source = size_t_from(size_t_from(a1 + 0x30) + 0x70)
+            target = Actor(size_t_from(size_t_from(a1 + 0x18) + 0x70))
+            source = Actor(size_t_from(size_t_from(a1 + 0x30) + 0x70))
+            source = source.parent or source
             self._on_damage(source, target, dmg, 0, -0x100)
         except:
             logging.error('on_process_dot_evt', exc_info=True)
         return res
 
-    def _on_enter_area(self, hook, a1, a2, a3):
-        res = hook.original(a1, a2, a3)
+    def _on_enter_area(self, hook, *a):
+        res = hook.original(*a)
         try:
             self.team_map = None
-            if actor_data_with_cache:
-                actor_base_name.cache_clear()
-                actor_type_id.cache_clear()
-                actor_idx.cache_clear()
+            self.member_info = None
             self.on_enter_area()
         except:
             logging.error('on_enter_area', exc_info=True)
         return res
 
-    if 1:
-        def _on_damage(self, source, target, damage, flags, action_id):
-            # TODO: 找个通用方法溯源
-            source_type_id = actor_type_id(source)
-            if source_type_id == 0x2af678e8:  # 菲莉宝宝 # Pl0700Ghost
-                source = size_t_from(size_t_from(source + 0xE48) + 0x70)
-            elif source_type_id == 0x8364c8bc:  # 菲莉 绕身球  # Pl0700GhostSatellite
-                source = size_t_from(size_t_from(source + 0x508) + 0x70)
-            elif source_type_id == 0xc9f45042:  # 老男人武器 # Wp1890
-                source = size_t_from(size_t_from(source + 0x578) + 0x70)
-            elif source_type_id == 0xf5755c0e:  # 龙人化 # Pl2000
-                source = size_t_from(size_t_from(source + 0xD028) + 0x70)
-            return self.on_damage(self.actor_data(source), self.actor_data(target), damage, flags, action_id)
-    else:
-        def _on_damage(self, source, target, damage, flags, action_id):
-            # TODO: 找个通用方法溯源
-            source_base_name = actor_base_name(source)
-            if source_base_name == b'Pl0700Ghost':  # 菲莉宝宝 # Pl0700Ghost
-                source = size_t_from(size_t_from(source + 0xE48) + 0x70)
-            elif source_base_name == b'Pl0700GhostSatellite':  # 菲莉 绕身球  # Pl0700GhostSatellite
-                source = size_t_from(size_t_from(source + 0x508) + 0x70)
-            elif source_base_name == b'Wp1890':  # 老男人武器 # Wp1890
-                source = size_t_from(size_t_from(source + 0x578) + 0x70)
-            elif source_base_name == b'Pl2000':  # 龙人化 # Pl2000
-                source = size_t_from(size_t_from(source + 0xD028) + 0x70)
-            return self.on_damage(self.actor_data(source), self.actor_data(target), damage, flags, action_id)
+    def _on_damage(self, source, target, damage, flags, action_id):
+        return self.on_damage(self.actor_data(source), self.actor_data(target), damage, flags, action_id)
 
     def on_damage(self, source, target, damage, flags, action_id):
+        pass
+
+    def on_load_party(self, datas):
         pass
 
     def on_enter_area(self):
@@ -1948,20 +2077,25 @@ class Act:
         return cls.get_or_create()
 
 
-class TestAct(Act):
-    lock = threading.Lock()
-
-    def on_damage(self, source, target, damage, flags, action_id):
-        with self.lock:
-            print(f'{source} -> {target} {action_id=} {damage=} {flags=}')
-
-    def on_enter_area(self):
-        with self.lock:
-            print('on_enter_area')
-
-
 def injected_main():
     print(f'i am in pid={os.getpid()}')
+
+    class TestAct(Act):
+        lock = threading.Lock()
+
+        def on_damage(self, source, target, damage, flags, action_id):
+            with self.lock:
+                flags_ = [off for off in range(flags.bit_length()) if flags & (1 << off)]
+                print(f'{source} -> {target} {action_id=} {damage=} {flags_=}')
+
+        def on_enter_area(self):
+            with self.lock:
+                print('on_enter_area')
+
+        def on_load_party(self, datas):
+            with self.lock:
+                print('on_load_party', datas)
+
     TestAct.reload()
     print('Act installed')
 
@@ -1974,6 +2108,7 @@ def main(exe_name):
     process.injector.reg_std_out(lambda _, s: print(s, end=''))
     process.injector.reg_std_err(lambda _, s: print(s, end=''))
     process.injector.run("import importlib;import injector;importlib.reload(injector).injected_main()")
+    os.system('pause')  # wait for user to close the console
 
 
 if __name__ == '__main__':
