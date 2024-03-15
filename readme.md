@@ -4,7 +4,7 @@
 ![img](./demo.png)
 
 ### Changes
-   - Inverted colors so its dark mode (my eyes hurt in light mode so I made this ¯\\__(ツ)_/¯)
+   - Made it dark mode because it was hurting my eyes.
 
 ### Steps
 
