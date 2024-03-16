@@ -1,9 +1,9 @@
 # GBFR-ACT
 ## Granblue Fantasy Relink - Analytics for Combat Tracking
 
-![img](./img/demo.jpg)
-![img](./img/demo2.jpg)
-![img](./img/demo3.jpg)
+![img](./img/demo.png)
+![img](./img/demo2.png)
+![img](./img/demo3.png)
 
 ### Changes
    - Made it dark mode because it was hurting my eyes.
